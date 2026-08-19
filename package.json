@@ -1,0 +1,17 @@
+{
+  "name": "storyblok-faq-sync",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "node-html-parser": "^9.0.1",
+    "storyblok-js-client": "^7.7.3"
+  }
+}
