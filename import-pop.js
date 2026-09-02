@@ -214,8 +214,7 @@ const buildCategoryContent = (item, fallbackName = "") => {
 };
 
 const storeFolders = new Map();
-const categoryFolders = new Map();
-const parentFoldersByName = new Map();
+const parentFolders = new Map();
 
 for (const item of itemsToImport) {
   const storeCode = String(item.store_code ?? "unknown");
@@ -225,16 +224,6 @@ for (const item of itemsToImport) {
     storeFolders.set(storeCode, bicyclesFolderId);
   }
 }
-
-const ensureCategoryFolder = async (item, parentId) => {
-  const key = getCategoryKey(item);
-  if (key && categoryFolders.has(key)) return categoryFolders.get(key);
-
-  const name = item.name || item.url_key || `Category ${item.category_id ?? "item"}`;
-  const folderId = await ensureFolder(name, parentId);
-  if (key) categoryFolders.set(key, folderId);
-  return folderId;
-};
 
 const ensureCategoryStory = async (item, parentId) => {
   const name = item.name || item.url_key || `Category ${item.category_id ?? "item"}`;
@@ -259,28 +248,35 @@ const resolveParentFolderId = async (item, storeRootId, stack = new Set()) => {
     if (parentEntry) {
       if (stack.has(parentKey)) throw new Error(`Cycle detected for parent key "${parentKey}"`);
 
-      const cachedParentFolder = categoryFolders.get(parentKey);
-      if (cachedParentFolder) return cachedParentFolder;
+      const cachedParentFolderId = parentFolders.get(parentKey);
+      if (cachedParentFolderId) return cachedParentFolderId;
 
       const nextStack = new Set(stack);
       nextStack.add(parentKey);
-      const grandParentFolderId = await resolveParentFolderId(parentEntry, storeRootId, nextStack);
-      return ensureCategoryFolder(parentEntry, grandParentFolderId);
+      const grandParentFolderId = await resolveParentFolderId(
+        parentEntry,
+        storeRootId,
+        nextStack
+      );
+      const parentName = parentEntry.name || parentEntry.url_key || `Category ${parentCategoryId}`;
+      const folderId = await ensureFolder(parentName, grandParentFolderId ?? storeRootId);
+      parentFolders.set(parentKey, folderId);
+      return folderId;
     }
   }
 
   const parentName = item.parent?.name;
   if (parentName) {
     const parentNameKey = `${storeCode}|name|${slugify(parentName)}`;
-    const cachedByName = parentFoldersByName.get(parentNameKey);
+    const cachedByName = parentFolders.get(parentNameKey);
     if (cachedByName) return cachedByName;
 
     const folderId = await ensureFolder(parentName, storeRootId);
-    parentFoldersByName.set(parentNameKey, folderId);
+    parentFolders.set(parentNameKey, folderId);
     return folderId;
   }
 
-  return storeRootId;
+  return null;
 };
 
 for (const item of itemsToImport) {
@@ -298,8 +294,8 @@ for (const item of itemsToImport) {
 
   try {
     const parentFolderId = await resolveParentFolderId(item, storeRootId);
-    const categoryFolderId = await ensureCategoryFolder(item, parentFolderId);
-    const result = await ensureCategoryStory(item, categoryFolderId);
+    const targetParentId = parentFolderId ?? storeRootId;
+    const result = await ensureCategoryStory(item, targetParentId);
 
     if (result.created) stats.items.created++;
     else if (result.updated) stats.items.updated++;
