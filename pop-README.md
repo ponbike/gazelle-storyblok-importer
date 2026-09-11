@@ -2,6 +2,8 @@
 
 Imports Magento category data from `category_export.json` into Storyblok using `import-pop.js`.
 
+By default, the importer only processes these locales: `nl-nl`, `nl-be`, `de-de`, `en-us`, `da-dk`, and `sv-se`. All other locales are skipped.
+
 ## What `import-pop.js` does
 
 For each category item it ensures this content structure:
@@ -9,22 +11,20 @@ For each category item it ensures this content structure:
 ```
 content/
   <store_code>/
-    fietsen/
+    <localized category root from url_path>/
       ...optional parent folders...
         <category folder>/
-          <category story>
+          <category startpage story>
 ```
 
 Behavior details:
 
 1. Creates `<store_code>` under the Storyblok root if missing.
-2. Creates `fietsen` under each `<store_code>` if missing.
-3. Resolves parent hierarchy from the import data:
-   - First by `parent_id` (recursive chain).
-   - Fallback by `parent.name` within the same `store_code`.
-4. Creates missing parent folders automatically.
-5. Creates/updates the category story in its resolved category folder.
-6. Re-runs are safe: existing folders/stories are reused by slug/name.
+2. Builds the full folder chain for each category from `url_path`.
+3. Creates missing folders only when the existing entry at that slug is actually a folder.
+4. Creates or updates the category page as a story inside the leaf folder, using the leaf slug as a startpage-style story.
+5. Skips entries whose `store_code` is not in the supported locale allowlist.
+6. Re-runs are safe as long as the folder structure already matches the intended path.
 
 ## Field mapping
 
@@ -32,16 +32,14 @@ These fields are written to Storyblok content:
 
 | Source (`category_export.json`) | Storyblok field |
 | --- | --- |
-| `name` | `name` |
+| `name` | `page_title` |
 | `description` | `description` |
 | `additional_description` | `additional_description` |
-| `url_key` | `url_key` |
-| `url_path` | `url_path` |
-| `image` | `image` |
-| `meta_tags.title` (fallback: `meta_title`) | `meta_title` |
-| `meta_tags.description` (fallback: `meta_description`) | `meta_description` |
+| `meta_title` | `meta_tags.title` |
+| `meta_description` | `meta_tags.description` |
+| default block | `blocks[0]` (`ProductListing`) |
 
-The Storyblok component defaults to `ProductOverviewPageCategory` and can be overridden with `--component`.
+The Storyblok component defaults to `ProductOverviewPage` and can be overridden with `--component`.
 
 ## Setup
 
@@ -71,6 +69,8 @@ node import-pop.js [flags]
 | `--limit <n>` | number | Import only the first `n` items. Without this flag, all items are imported. |
 | `--skip-existing` | boolean | Do not update existing stories; only create missing ones. |
 | `--component <name>` | string | Override the Storyblok component name. |
+| `--category_id <id>` | string | Import only entries for the given category ID. |
+| `--locale <store_code>` | string | Import only entries for one supported locale/store code, for example `en-us`. |
 
 ## Examples
 
@@ -85,7 +85,10 @@ node import-pop.js --limit 25
 node import-pop.js --limit 25 --skip-existing
 
 # Import all items using a custom component
-node import-pop.js --component ProductOverviewPageCategory
+node import-pop.js --component ProductOverviewPage
+
+# Import one category for one locale
+node import-pop.js --category_id 876 --locale en-us
 ```
 
 ## Failure logging
@@ -101,3 +104,5 @@ Example:
 ```text
 ! category_id=36 store_code=nl-nl name="Eclipse": <error message>
 ```
+
+If an old incorrectly imported story already occupies a slug where a folder now needs to exist, the importer will stop on that path until that conflicting story is removed manually.

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
@@ -12,7 +13,8 @@ const SPACE_ID = process.env.STORYBLOK_SPACE_ID ?? "228883";
 const EXPORT_FILE = new URL("./category_export.json", import.meta.url);
 const PER_PAGE = 100;
 const ROOT_PARENT_ID = 0;
-const DEFAULT_COMPONENT = "ProductOverviewPageCategory";
+const DEFAULT_COMPONENT = "ProductOverviewPage";
+const ALLOWED_LOCALES = new Set(["nl-nl", "nl-be", "de-de", "en-us", "da-dk", "sv-se"]);
 
 const oauthToken = process.env.STORYBLOK_OAUTH_TOKEN;
 if (!oauthToken) {
@@ -27,6 +29,9 @@ const { values: args } = parseArgs({
     limit: { type: "string" },
     "skip-existing": { type: "boolean" },
     component: { type: "string" },
+    category_id: { type: "string" },
+    "category-id": { type: "string" },
+    locale: { type: "string" },
   },
 });
 
@@ -42,13 +47,6 @@ const slugify = (value) =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 200) || "item";
-
-const normalizeName = (value) =>
-  String(value ?? "")
-    .trim()
-    .toLowerCase()
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "");
 
 const request = async (fn, label) => {
   for (let attempt = 1; ; attempt++) {
@@ -97,19 +95,15 @@ const getChildren = async (parentId) => {
   return children;
 };
 
-const ensureFolder = async (name, parentId) => {
-  const slug = slugify(name);
+const ensureFolder = async ({ name, slug, parentId }) => {
+  const normalizedSlug = slugify(slug || name);
   const children = await getChildren(parentId);
-  const exact = children.get(slug);
-  const byName = [...children.values()].find(
-    (story) => normalizeName(story.name) === normalizeName(name)
-  );
-  const existing = exact ?? byName;
+  const existing = children.get(normalizedSlug);
 
   if (existing) {
     if (!existing.is_folder) {
       throw new Error(
-        `Expected folder "${name}" under parent ${parentId}, but found a story with the same key`
+        `Expected folder "${name}" (slug "${normalizedSlug}") under parent ${parentId}, but found a story with the same slug. Remove the conflicting story before importing this nested path.`
       );
     }
     return existing.id;
@@ -118,18 +112,19 @@ const ensureFolder = async (name, parentId) => {
   const { data } = await request(
     () =>
       storyblok.post(`spaces/${SPACE_ID}/stories`, {
-        story: { name, slug, is_folder: true, parent_id: parentId },
+        story: { name, slug: normalizedSlug, is_folder: true, parent_id: parentId },
       }),
     `creating folder "${name}"`
   );
 
-  children.set(slug, data.story);
+  children.set(normalizedSlug, data.story);
   return data.story.id;
 };
 
-const ensureStory = async ({ name, slug, parentId, content, update = false }) => {
+const ensureStory = async ({ name, slug, parentId, content, update = false, isStartpage = false }) => {
+  const normalizedSlug = slugify(slug || name);
   const children = await getChildren(parentId);
-  const existing = children.get(slug);
+  const existing = children.get(normalizedSlug);
 
   if (existing && !update) {
     return { created: false, updated: false, id: existing.id, uuid: existing.uuid };
@@ -139,22 +134,30 @@ const ensureStory = async ({ name, slug, parentId, content, update = false }) =>
     await request(
       () =>
         storyblok.put(`spaces/${SPACE_ID}/stories/${existing.id}`, {
-          story: { name, slug, parent_id: parentId, content },
+          story: { name, slug: normalizedSlug, parent_id: parentId, content, is_startpage: isStartpage },
         }),
       `updating story "${name}"`
     );
+    children.set(normalizedSlug, {
+      ...existing,
+      name,
+      slug: normalizedSlug,
+      parent_id: parentId,
+      content,
+      is_startpage: isStartpage,
+    });
     return { created: false, updated: true, id: existing.id, uuid: existing.uuid };
   }
 
   const { data } = await request(
     () =>
       storyblok.post(`spaces/${SPACE_ID}/stories`, {
-        story: { name, slug, parent_id: parentId, content },
+        story: { name, slug: normalizedSlug, parent_id: parentId, content, is_startpage: isStartpage },
       }),
     `creating story "${name}"`
   );
 
-  children.set(slug, data.story);
+  children.set(normalizedSlug, data.story);
   return { created: true, updated: false, id: data.story.id, uuid: data.story.uuid };
 };
 
@@ -171,7 +174,43 @@ if (entries.length === 0) {
   process.exit(1);
 }
 
-const selectedEntries = entries;
+const requestedCategoryId = (args.category_id ?? args["category-id"])?.trim();
+const requestedLocale = args.locale?.trim();
+
+if ((args.category_id != null || args["category-id"] != null) && !requestedCategoryId) {
+  console.error("Invalid --category_id value. Use a non-empty category ID.");
+  process.exit(1);
+}
+
+if (args.locale != null && !requestedLocale) {
+  console.error("Invalid --locale value. Use a non-empty locale.");
+  process.exit(1);
+}
+
+if (requestedLocale && !ALLOWED_LOCALES.has(requestedLocale)) {
+  console.error(
+    `Unsupported --locale value "${requestedLocale}". Allowed locales: ${[...ALLOWED_LOCALES].join(", ")}.`
+  );
+  process.exit(1);
+}
+
+const selectedEntries = entries.filter((item) => {
+  const storeCode = String(item?.store_code ?? "");
+  if (!ALLOWED_LOCALES.has(storeCode)) return false;
+  if (requestedCategoryId && String(item?.category_id ?? "") !== requestedCategoryId) return false;
+  if (requestedLocale && storeCode !== requestedLocale) return false;
+  return true;
+});
+
+if ((requestedCategoryId || requestedLocale) && selectedEntries.length === 0) {
+  const filters = [
+    requestedCategoryId ? `category_id=${requestedCategoryId}` : null,
+    requestedLocale ? `locale=${requestedLocale}` : null,
+  ].filter(Boolean);
+  console.error(`No entries found for ${filters.join(" ")}.`);
+  process.exit(1);
+}
+
 const hasLimitArg = args.limit != null;
 const requestedLimit = Number(args.limit);
 if (hasLimitArg && (!Number.isFinite(requestedLimit) || requestedLimit <= 0)) {
@@ -182,120 +221,166 @@ if (hasLimitArg && (!Number.isFinite(requestedLimit) || requestedLimit <= 0)) {
 const itemsToImport = hasLimitArg
   ? selectedEntries.slice(0, requestedLimit)
   : selectedEntries;
-console.log(`Importing ${itemsToImport.length} of ${selectedEntries.length} item(s)`);
+const scopeParts = [
+  requestedCategoryId ? `category_id=${requestedCategoryId}` : null,
+  requestedLocale ? `locale=${requestedLocale}` : null,
+].filter(Boolean);
+const importScopeLabel = scopeParts.length > 0
+  ? `matching item(s) for ${scopeParts.join(" ")}`
+  : "item(s)";
+console.log(`Importing ${itemsToImport.length} of ${selectedEntries.length} ${importScopeLabel}`);
 
-const getCategoryKey = (item) => {
-  if (item?.category_id == null) return null;
-  const storeCode = String(item.store_code ?? "unknown");
-  return `${storeCode}|${String(item.category_id)}`;
-};
+const getPathSegments = (item) =>
+  String(item?.url_path ?? "")
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
 
-const categoryEntries = new Map();
-for (const entry of entries) {
-  const key = getCategoryKey(entry);
-  if (key && !categoryEntries.has(key)) categoryEntries.set(key, entry);
-}
+const getPathKey = (storeCode, segments) =>
+  `${storeCode}|path|${segments.map((segment) => slugify(segment)).join("/")}`;
+
+const buildDefaultProductListingBlock = () => ({
+  _uid: randomUUID(),
+  component: "ProductListing",
+  ebike: [],
+  frame: [],
+  segment: [],
+  price_max: "",
+  price_min: "0",
+  cta_blocks: [],
+  weight_max: "",
+  weight_min: "",
+  show_filters: true,
+  show_sorting: true,
+  seating_position: [],
+  preselected_filters: [],
+});
 
 const buildCategoryContent = (item, fallbackName = "") => {
   const name = item.name || item.url_key || fallbackName || `Category ${item.category_id ?? "item"}`;
-  const url = item.url_path || item.url_key || item.url || "";
 
   return {
     component: args.component ?? DEFAULT_COMPONENT,
-    name,
+    page_title: name,
     description: item.description ?? "",
     additional_description: item.additional_description ?? "",
-    url_key: item.url_key ?? "",
-    url_path: item.url_path ?? url,
-    image: item.image ?? "",
-    meta_title: item.meta_title ?? item.meta_tags?.title ?? "",
-    meta_description: item.meta_description ?? item.meta_tags?.description ?? "",
+    meta_tags: {
+      plugin: 'seo_metatags',
+      title: item.meta_title ?? item.meta_tags?.title ?? "",
+      description: item.meta_description ?? item.meta_tags?.description ?? "",
+    },
+    blocks: [buildDefaultProductListingBlock()],
   };
 };
 
-const storeFolders = new Map();
-const parentFolders = new Map();
+const storeDefaultRootFolderNames = new Map();
+for (const entry of entries) {
+  const storeCode = String(entry.store_code ?? "unknown");
+  if (storeDefaultRootFolderNames.has(storeCode)) continue;
 
-for (const item of itemsToImport) {
-  const storeCode = String(item.store_code ?? "unknown");
-  if (!storeFolders.has(storeCode)) {
-    const storeFolderId = await ensureFolder(storeCode, ROOT_PARENT_ID);
-    const bicyclesFolderId = await ensureFolder("fietsen", storeFolderId);
-    storeFolders.set(storeCode, bicyclesFolderId);
-  }
+  const segment = getPathSegments(entry)[0] ?? null;
+  if (segment) storeDefaultRootFolderNames.set(storeCode, segment);
 }
 
-const ensureCategoryStory = async (item, parentId) => {
-  const name = item.name || item.url_key || `Category ${item.category_id ?? "item"}`;
-  const slug = slugify(item.url_key || item.name || `category-${item.category_id ?? name}`);
+const resolveRootFolderName = (item) => {
+  const storeCode = String(item.store_code ?? "unknown");
+  return getPathSegments(item)[0] ?? storeDefaultRootFolderNames.get(storeCode) ?? "fietsen";
+};
+
+const getCategoryName = (item, fallbackName = "") =>
+  item.name || item.url_key || fallbackName || `Category ${item.category_id ?? "item"}`;
+
+const getCategoryFolderSegments = (item) => {
+  const pathSegments = getPathSegments(item);
+  if (pathSegments.length > 0) return pathSegments;
+
+  const rootFolderName = resolveRootFolderName(item);
+  const leafSegment = item.url_key || item.name || `category-${item.category_id ?? "item"}`;
+  return [rootFolderName, leafSegment];
+};
+
+const categoryEntriesByPath = new Map();
+for (const entry of entries) {
+  const storeCode = String(entry.store_code ?? "unknown");
+  const pathSegments = getCategoryFolderSegments(entry);
+  if (pathSegments.length > 0) categoryEntriesByPath.set(getPathKey(storeCode, pathSegments), entry);
+}
+
+const resolveFolderName = (storeCode, pathSegments, index, currentItem) => {
+  if (index === pathSegments.length - 1) {
+    return getCategoryName(currentItem, pathSegments[index]);
+  }
+
+  const ancestorEntry = categoryEntriesByPath.get(
+    getPathKey(storeCode, pathSegments.slice(0, index + 1))
+  );
+  return getCategoryName(ancestorEntry ?? {}, pathSegments[index]);
+};
+
+const storeFolders = new Map();
+const categoryFolderIds = new Map();
+
+const ensureCategoryFolderChain = async (item) => {
+  const storeCode = String(item.store_code ?? "unknown");
+  let storeFolderId = storeFolders.get(storeCode);
+  if (!storeFolderId) {
+    storeFolderId = await ensureFolder({
+      name: storeCode,
+      slug: storeCode,
+      parentId: ROOT_PARENT_ID,
+    });
+    storeFolders.set(storeCode, storeFolderId);
+  }
+
+  const pathSegments = getCategoryFolderSegments(item);
+  let parentId = storeFolderId;
+
+  for (let index = 0; index < pathSegments.length; index++) {
+    const segment = pathSegments[index];
+    const pathKey = getPathKey(storeCode, pathSegments.slice(0, index + 1));
+    const cachedFolderId = categoryFolderIds.get(pathKey);
+    if (cachedFolderId) {
+      parentId = cachedFolderId;
+      continue;
+    }
+
+    const folderName = resolveFolderName(storeCode, pathSegments, index, item);
+    parentId = await ensureFolder({
+      name: folderName,
+      slug: segment,
+      parentId,
+    });
+    categoryFolderIds.set(pathKey, parentId);
+  }
+
+  return {
+    leafFolderId: parentId,
+    pathSegments,
+  };
+};
+
+const ensureCategoryStory = async (item, parentId, slug) => {
+  const name = getCategoryName(item);
   return await ensureStory({
     name,
     slug,
     parentId,
     content: buildCategoryContent(item, name),
     update: updateExisting,
+    isStartpage: true,
   });
 };
 
-const resolveParentFolderId = async (item, storeRootId, stack = new Set()) => {
-  const storeCode = String(item.store_code ?? "unknown");
-  const parentCategoryId = Number(item.parent_id);
-
-  if (Number.isFinite(parentCategoryId) && parentCategoryId > 0) {
-    const parentKey = `${storeCode}|${String(parentCategoryId)}`;
-    const parentEntry = categoryEntries.get(parentKey);
-
-    if (parentEntry) {
-      if (stack.has(parentKey)) throw new Error(`Cycle detected for parent key "${parentKey}"`);
-
-      const cachedParentFolderId = parentFolders.get(parentKey);
-      if (cachedParentFolderId) return cachedParentFolderId;
-
-      const nextStack = new Set(stack);
-      nextStack.add(parentKey);
-      const grandParentFolderId = await resolveParentFolderId(
-        parentEntry,
-        storeRootId,
-        nextStack
-      );
-      const parentName = parentEntry.name || parentEntry.url_key || `Category ${parentCategoryId}`;
-      const folderId = await ensureFolder(parentName, grandParentFolderId ?? storeRootId);
-      parentFolders.set(parentKey, folderId);
-      return folderId;
-    }
-  }
-
-  const parentName = item.parent?.name;
-  if (parentName) {
-    const parentNameKey = `${storeCode}|name|${slugify(parentName)}`;
-    const cachedByName = parentFolders.get(parentNameKey);
-    if (cachedByName) return cachedByName;
-
-    const folderId = await ensureFolder(parentName, storeRootId);
-    parentFolders.set(parentNameKey, folderId);
-    return folderId;
-  }
-
-  return null;
-};
-
 for (const item of itemsToImport) {
-  const storeCode = String(item.store_code ?? "unknown");
-  const storeRootId = storeFolders.get(storeCode);
-  const name = item.name || item.url_key || `Category ${item.category_id ?? "item"}`;
+  const name = getCategoryName(item);
   const categoryId = item.category_id ?? "unknown";
-  const itemLog = `category_id=${categoryId} store_code=${storeCode} name="${name}"`;
-
-  if (!storeRootId) {
-    console.error(`  ! ${itemLog}: missing parent folder`);
-    stats.items.failed++;
-    continue;
-  }
+  const itemLog = `category_id=${categoryId} store_code=${String(item.store_code ?? "unknown")} name="${name}"`;
 
   try {
-    const parentFolderId = await resolveParentFolderId(item, storeRootId);
-    const targetParentId = parentFolderId ?? storeRootId;
-    const result = await ensureCategoryStory(item, targetParentId);
+    const { leafFolderId, pathSegments } = await ensureCategoryFolderChain(item);
+    const storySlug =
+      pathSegments.at(-1) ?? item.url_key ?? item.name ?? `category-${item.category_id ?? "item"}`;
+    const result = await ensureCategoryStory(item, leafFolderId, storySlug);
 
     if (result.created) stats.items.created++;
     else if (result.updated) stats.items.updated++;
