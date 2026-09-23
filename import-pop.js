@@ -256,6 +256,34 @@ const buildDefaultProductListingBlock = () => ({
   preselected_filters: [],
 });
 
+const parseSeoLinks = (raw) => {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw !== "string" || !raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+const buildSeoLinkBlocks = (item) =>
+  parseSeoLinks(item.seo_links)
+    .filter((link) => link?.label && link?.url)
+    .sort((a, b) => Number(a.position ?? 0) - Number(b.position ?? 0))
+    .map((link) => ({
+      _uid: randomUUID(),
+      component: "SeoLinkItem",
+      label: String(link.label),
+      url: {
+        id: "",
+        url: String(link.url),
+        linktype: "url",
+        fieldtype: "multilink",
+        cached_url: String(link.url),
+      },
+    }));
+
 const buildCategoryContent = (item, fallbackName = "") => {
   const name = item.name || item.url_key || fallbackName || `Category ${item.category_id ?? "item"}`;
 
@@ -270,6 +298,7 @@ const buildCategoryContent = (item, fallbackName = "") => {
       description: item.meta_description ?? item.meta_tags?.description ?? "",
     },
     blocks: [buildDefaultProductListingBlock()],
+    seo_links: buildSeoLinkBlocks(item),
   };
 };
 
