@@ -173,7 +173,18 @@ const assignSlugs = (items) => {
   return items;
 };
 
-const entries = JSON.parse(await readFile(EXPORT_FILE, "utf8"));
+const STORE_CODE_MAP = { "en-uk": "en-gb" };
+
+const allEntries = JSON.parse(await readFile(EXPORT_FILE, "utf8"));
+const entries = allEntries
+  .filter((entry) => !entry.store_code?.startsWith("union"))
+  .map((entry) => ({
+    ...entry,
+    store_code: STORE_CODE_MAP[entry.store_code] ?? entry.store_code,
+  }));
+
+const unionSkipped = allEntries.length - entries.length;
+if (unionSkipped > 0) console.warn(`Skipping ${unionSkipped} union entries`);
 
 const usable = entries.filter((entry) => entry.category_parent?.name);
 const orphans = entries.length - usable.length;
@@ -372,7 +383,7 @@ for (const question of selectedQuestions) {
 
     for (const tag of attempt.warnings.unmapped) unmappedTags.add(tag);
     for (const dropped of attempt.warnings.dropped) {
-      droppedEmbeds.push(`faq_id ${question.sourceId} — ${dropped}`);
+      droppedEmbeds.push(`${question.store}: "${question.title}" — ${dropped}`);
     }
 
     if (result.created) stats.questions.created++;
