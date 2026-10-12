@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { parse } from "node-html-parser";
 
 const NODE_ELEMENT = 1;
@@ -33,7 +34,6 @@ const IGNORED_TAGS = new Set(["script", "style", "col", "link", "meta"]);
 
 // Real content that richtext cannot represent, so callers get told what was lost.
 const EMBED_TAGS = new Set([
-  "iframe",
   "img",
   "video",
   "audio",
@@ -95,6 +95,23 @@ const paragraphOf = (content) =>
 const atLeastOneBlock = (blocks) =>
   blocks.length ? blocks : [{ type: "paragraph" }];
 
+const htmlBlockNode = (html) => ({
+  type: "blok",
+  attrs: {
+    id: randomUUID(),
+    body: [
+      {
+        _uid: randomUUID(),
+        component: "HtmlBlock",
+        html,
+        custom_padding: false,
+        padding_top: false,
+        padding_bottom: false,
+      },
+    ],
+  },
+});
+
 const createConverter = (context) => {
   const { warnings, tableMode } = context;
 
@@ -124,6 +141,11 @@ const createConverter = (context) => {
     }
 
     if (IGNORED_TAGS.has(tag)) return;
+
+    if (tag === "iframe") {
+      yield { kind: "block", node: htmlBlockNode(node.toString()) };
+      return;
+    }
 
     if (EMBED_TAGS.has(tag)) {
       const src = node.getAttribute("src") ?? node.getAttribute("data-src");
@@ -227,16 +249,21 @@ const createConverter = (context) => {
     if (tableMode === "flat") {
       for (const row of rows) {
         const content = [];
+        const bloks = [];
         for (const cell of rowCells(row)) {
-          const inline = trimInlineRun([
-            ...streamChildren(cell.childNodes, marks),
-          ].filter((item) => item.kind === "inline").map((item) => item.node));
+          const items = [...streamChildren(cell.childNodes, marks)];
+          bloks.push(...items.filter((item) => item.node.type === "blok"));
+          const inline = trimInlineRun(
+            items.filter((item) => item.kind === "inline").map((item) => item.node)
+          );
 
           if (!inline.length) continue;
           if (content.length) content.push({ type: "text", text: " | " });
           content.push(...inline);
         }
         if (content.length) yield { kind: "block", node: { type: "paragraph", content } };
+        // Keep embeds from flattened cells instead of losing them.
+        yield* bloks;
       }
       return;
     }
